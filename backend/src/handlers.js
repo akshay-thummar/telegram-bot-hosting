@@ -1,27 +1,47 @@
 import { authenticate } from "./utils";
+import bcrypt from 'bcryptjs';
 
-export async function handleRegister(body, env) {
-  const { username, email } = body;
-  const api_key = crypto.randomUUID();
-  await env.DB.prepare('INSERT INTO users (username, email, api_key, created_at) VALUES (?, ?, ?, ?)').bind(username, email, api_key, new Date().toISOString()).run();
-  return { api_key };
-}
-
-// export async function handleHostBot(body, env, url) {
-// //   const { user_id, token, name } = body;  // Add auth check in production
-//   await env.DB.prepare('INSERT INTO bots (user_id, token, name, status, created_at) VALUES (?, ?, ?, ?, ?)').bind(user_id, token, name, 'active', new Date().toISOString()).run();
-//   const webhookUrl = `https://${url.host}/webhook/${token}`;
-// //   await fetch(`${env.TELEGRAM_API}/bot${token}/setWebhook?url=${webhookUrl}`);
-//   return { success: true };
+// export async function handleRegister(body, env) {
+//   const { username, email } = body;
+//   const api_key = crypto.randomUUID();
+//   await env.DB.prepare('INSERT INTO users (username, email, api_key, created_at) VALUES (?, ?, ?, ?)').bind(username, email, api_key, new Date().toISOString()).run();
+//   return { api_key };
 // }
 
-export async function handleHostBot(body, env, url, user) {
+export async function handleRegister(body, env) {
+  const { username, email, password } = body;
+  if (!password) throw new Error('Password required');
+  const password_hash = await bcrypt.hash(password, 10); // salt rounds
+  const api_key = crypto.randomUUID();
+  try {
+    await env.DB.prepare(`
+      INSERT INTO users (username, email, api_key, password_hash, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(username, email, api_key, password_hash, new Date().toISOString()).run();
+    return { api_key };
+  } catch (error) {
+    if (error.message && error.message.includes('UNIQUE constraint failed')) {
+      return { success: false, error: 'User already exists with this email or username.' };
+    }
+    throw error;
+  }
+}
+
+export async function handleLogin(body, env) {
+  const { email, password } = body;
+  const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
+  if (!user) throw new Error('User not found');
+  const valid = await bcrypt.compare(password, user.password_hash);
+  if (!valid) throw new Error('Invalid password');
+  return { api_key: user.api_key, username: user.username };
+}
+
+export async function handleHostBot(body, env, url, user_id) {
   const { token, name } = body;
-  const user_id = user.user_id; // Derived from auth
   if (!user_id || !token || !name) throw new Error('Missing required fields');
   await env.DB.prepare('INSERT INTO bots (user_id, token, name, status, created_at) VALUES (?, ?, ?, ?, ?)').bind(user_id, token, name, 'active', new Date().toISOString()).run();
   const webhookUrl = `https://${url.host}/webhook/${token}`;
-//   await fetch(`${env.TELEGRAM_API}/bot${token}/setWebhook?url=${webhookUrl}`);
+  await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${webhookUrl}`);
   return { success: true };
 }
 
@@ -36,18 +56,77 @@ export async function handleHostBot(body, env, url, user) {
 //   return { success: true };
 // }
 
-export async function handleCommand(body, env, user) {
+export async function handleCommand(body, env, user_id) {
   const { bot_id, command_name, script } = body;
-  // Validate bot belongs to user
-  const bot = await env.DB.prepare('SELECT * FROM bots WHERE bot_id = ? AND user_id = ?').bind(bot_id, user.user_id).first();
+  const bot = await env.DB.prepare('SELECT * FROM bots WHERE bot_id = ? AND user_id = ?').bind(bot_id, user_id).first();
   if (!bot) throw new Error('Bot not found or not owned by user');
-  await env.DB.prepare(`
-    INSERT INTO commands (bot_id, command_name, script, version, created_at)
-    VALUES (?, ?, ?, 1, ?)
-    ON CONFLICT (bot_id, command_name) DO UPDATE SET script = excluded.script, version = version + 1
-  `).bind(bot_id, command_name, script, new Date().toISOString()).run();
+  try {
+    await env.DB.prepare(`
+      INSERT INTO commands (bot_id, command_name, script, version, created_at)
+      VALUES (?, ?, ?, 1, ?)
+    `).bind(bot_id, command_name, script, new Date().toISOString()).run();
+    return { success: true };
+  } catch (error) {
+    if (error.message && error.message.includes('UNIQUE constraint failed')) {
+      // UNIQUE (bot_id, command_name) is enforced in your schema
+      return { success: false, error: 'Command already exists with this name.' };
+    }
+    throw error; // other errors bubble up
+  }
+}
+
+export async function handleGetCommands(bot_id, env, user_id) {
+  if (!bot_id) return { error: 'Missing bot_id' };
+  const bot = await env.DB.prepare(
+    'SELECT * FROM bots WHERE bot_id = ? AND user_id = ?'
+  ).bind(bot_id, user_id).first();
+  if (!bot) return { error: 'Bot not found or not owned by user' };
+  const commands = await env.DB.prepare(
+    'SELECT * FROM commands WHERE bot_id = ?'
+  ).bind(bot_id).all();
+  return commands.results;
+}
+
+export async function handleUpdateCommand(body, env, user_id) {
+  const { bot_id, command_id, command_name, script } = body;
+  if (!bot_id || !command_id || !command_name || !script) {
+    return { error: 'Missing required fields' };
+  }
+  const bot = await env.DB.prepare(
+    'SELECT * FROM bots WHERE bot_id = ? AND user_id = ?'
+  ).bind(bot_id, user_id).first();
+  if (!bot) return { error: 'Bot not found or not owned by user' };
+  try {
+    await env.DB.prepare(
+      `UPDATE commands
+      SET command_name = ?, script = ?, version = version + 1, last_executed = NULL
+      WHERE command_id = ? AND bot_id = ?`
+    ).bind(command_name, script, command_id, bot_id).run();
+    return { success: true };
+  } catch (error) {
+    if (error.message && error.message.includes('UNIQUE')) {
+      return { success: false, error: 'Command name already exists for this bot.' };
+    }
+    throw error;
+  }
+}
+
+
+export async function handleDeleteCommand(body, env, user_id) {
+  const { bot_id, command_id } = body;
+  if (!bot_id || !command_id) {
+    return { error: 'Missing required fields' };
+  }
+  const bot = await env.DB.prepare(
+    'SELECT * FROM bots WHERE bot_id = ? AND user_id = ?'
+  ).bind(bot_id, user_id).first();
+  if (!bot) return { error: 'Bot not found or not owned by user' };
+  await env.DB.prepare(
+    'DELETE FROM commands WHERE command_id = ? AND bot_id = ?'
+  ).bind(command_id, bot_id).run();
   return { success: true };
 }
+
 
 export async function handleWebhook(body, env, token) {
   const bot = await env.DB.prepare('SELECT * FROM bots WHERE token = ?').bind(token).first();

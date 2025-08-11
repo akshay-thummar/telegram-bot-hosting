@@ -15,25 +15,32 @@ export async function handleRegister(body, env) {
 //   return { success: true };
 // }
 
-export async function handleHostBot(body, env, url) {
-    const { token, name } = body; // Don't expect user_id from body
-    const request = { headers: { get: (key) => env.AUTH_HEADER || body.headers?.Authorization } }; // Fallback for testing; use proper headers in production
-    const user = await authenticate(request, env); // Function from utils.js
-    const user_id = user.user_id;
-    
-    if (!user_id || !token || !name) {
-        throw new Error('Missing required fields');
-    }
-    
-    await env.DB.prepare('INSERT INTO bots (user_id, token, name, status, created_at) VALUES (?, ?, ?, ?, ?)').bind(user_id, token, name, 'active', new Date().toISOString()).run();
-    const webhookUrl = `https://${url.host}/webhook/${token}`;
-    // await fetch(`${env.TELEGRAM_API}/bot${token}/setWebhook?url=${webhookUrl}`);
-    return { success: true };
+export async function handleHostBot(body, env, url, user) {
+  const { token, name } = body;
+  const user_id = user.user_id; // Derived from auth
+  if (!user_id || !token || !name) throw new Error('Missing required fields');
+  await env.DB.prepare('INSERT INTO bots (user_id, token, name, status, created_at) VALUES (?, ?, ?, ?, ?)').bind(user_id, token, name, 'active', new Date().toISOString()).run();
+  const webhookUrl = `https://${url.host}/webhook/${token}`;
+//   await fetch(`${env.TELEGRAM_API}/bot${token}/setWebhook?url=${webhookUrl}`);
+  return { success: true };
 }
 
 
-export async function handleCommand(body, env) {
+// export async function handleCommand(body, env) {
+//   const { bot_id, command_name, script } = body;
+//   await env.DB.prepare(`
+//     INSERT INTO commands (bot_id, command_name, script, version, created_at)
+//     VALUES (?, ?, ?, 1, ?)
+//     ON CONFLICT (bot_id, command_name) DO UPDATE SET script = excluded.script, version = version + 1
+//   `).bind(bot_id, command_name, script, new Date().toISOString()).run();
+//   return { success: true };
+// }
+
+export async function handleCommand(body, env, user) {
   const { bot_id, command_name, script } = body;
+  // Validate bot belongs to user
+  const bot = await env.DB.prepare('SELECT * FROM bots WHERE bot_id = ? AND user_id = ?').bind(bot_id, user.user_id).first();
+  if (!bot) throw new Error('Bot not found or not owned by user');
   await env.DB.prepare(`
     INSERT INTO commands (bot_id, command_name, script, version, created_at)
     VALUES (?, ?, ?, 1, ?)

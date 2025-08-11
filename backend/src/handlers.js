@@ -1,5 +1,7 @@
 import { authenticate } from "./utils";
 import bcrypt from 'bcryptjs';
+import { TelegramBot } from "./telegram";
+import { ScriptExecutor } from './scriptExecutor.js';
 
 // export async function handleRegister(body, env) {
 //   const { username, email } = body;
@@ -36,13 +38,46 @@ export async function handleLogin(body, env) {
   return { api_key: user.api_key, username: user.username };
 }
 
+// export async function handleHostBot(body, env, url, user_id) {
+//   const { token, name } = body;
+//   if (!user_id || !token || !name) throw new Error('Missing required fields');
+//   await env.DB.prepare('INSERT INTO bots (user_id, token, name, status, created_at) VALUES (?, ?, ?, ?, ?)').bind(user_id, token, name, 'active', new Date().toISOString()).run();
+//   const webhookUrl = `https://${url.host}/webhook/${token}`;
+//   await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${webhookUrl}`);
+//   return { success: true };
+// }
+
 export async function handleHostBot(body, env, url, user_id) {
   const { token, name } = body;
   if (!user_id || !token || !name) throw new Error('Missing required fields');
-  await env.DB.prepare('INSERT INTO bots (user_id, token, name, status, created_at) VALUES (?, ?, ?, ?, ?)').bind(user_id, token, name, 'active', new Date().toISOString()).run();
+
+  // 1. Fetch bot details using getMe API
+  const getMeRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+  const getMeJson = await getMeRes.json();
+  if (!getMeJson.ok) {
+    throw new Error('Invalid bot token');
+  }
+  const botUsername = getMeJson.result.username || '';
+  const botFirstName = getMeJson.result.first_name || '';
+  // You can store other details from result as needed
+
+  // 2. Insert bot details along with metadata
+  await env.DB.prepare(
+    'INSERT INTO bots (user_id, token, name, status, config, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(
+    user_id,
+    token,
+    name,
+    'active',
+    JSON.stringify({ username: botUsername, first_name: botFirstName }), // store extra info in "config"
+    new Date().toISOString()
+  ).run();
+
+  // 3. Set webhook
   const webhookUrl = `https://${url.host}/webhook/${token}`;
   await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${webhookUrl}`);
-  return { success: true };
+
+  return { success: true, botUsername, botFirstName };
 }
 
 
@@ -128,24 +163,92 @@ export async function handleDeleteCommand(body, env, user_id) {
 }
 
 
+// export async function handleWebhook(body, env, token) {
+//   const bot = await env.DB.prepare('SELECT * FROM bots WHERE token = ?').bind(token).first();
+//   if (!bot) throw new Error('Bot not found');
+
+//   const message = body.message;
+//   if (message && message.text) {
+//     const command_name = message.text.split(' ')[0];
+//     const command = await env.DB.prepare('SELECT * FROM commands WHERE bot_id = ? AND command_name = ?').bind(bot.bot_id, command_name).first();
+//     if (command) {
+//       try {
+//         const func = new Function('message', command.script);
+//         const response = func(message);
+//         await fetch(`https://api.telegram.org/bot${token}/sendMessage?chat_id=${message.chat.id}&text=${response}`);
+//         await env.DB.prepare('UPDATE users SET points = points - 1 WHERE user_id = ?').bind(bot.user_id).run();
+//         await env.DB.prepare('INSERT INTO logs (bot_id, command_id, action, details, points_deducted, timestamp) VALUES (?, ?, ?, ?, ?, ?)').bind(bot.bot_id, command.command_id, 'script_executed', JSON.stringify({ output: response }), 1, new Date().toISOString()).run();
+//       } catch (error) {
+//         await env.DB.prepare('INSERT INTO logs (bot_id, command_id, action, details, timestamp) VALUES (?, ?, ?, ?, ?)').bind(bot.bot_id, command.command_id, 'error_in_script', error.message, new Date().toISOString()).run();
+//       }
+//     }
+//   }
+//   return { success: true };
+// }
+
+// backend/src/handlers.js
+
+
 export async function handleWebhook(body, env, token) {
-  const bot = await env.DB.prepare('SELECT * FROM bots WHERE token = ?').bind(token).first();
-  if (!bot) throw new Error('Bot not found');
+  const bot_record = await env.DB.prepare('SELECT * FROM bots WHERE token = ?').bind(token).first();
+  if (!bot_record) throw new Error('Bot not found');
 
   const message = body.message;
   if (message && message.text) {
     const command_name = message.text.split(' ')[0];
-    const command = await env.DB.prepare('SELECT * FROM commands WHERE bot_id = ? AND command_name = ?').bind(bot.bot_id, command_name).first();
+    const command = await env.DB.prepare('SELECT * FROM commands WHERE bot_id = ? AND command_name = ?')
+      .bind(bot_record.bot_id, command_name).first();
+    
+    let response = '';
+    let executed_successfully = false;
+
     if (command) {
       try {
-        const func = new Function('message', command.script);
-        const response = func(message);
-        await fetch(`${env.TELEGRAM_API}/bot${token}/sendMessage?chat_id=${message.chat.id}&text=${response}`);
-        await env.DB.prepare('UPDATE users SET points = points - 1 WHERE user_id = ?').bind(bot.user_id).run();
-        await env.DB.prepare('INSERT INTO logs (bot_id, command_id, action, details, points_deducted, timestamp) VALUES (?, ?, ?, ?, ?, ?)').bind(bot.bot_id, command.command_id, 'script_executed', JSON.stringify({ output: response }), 1, new Date().toISOString()).run();
-      } catch (error) {
-        await env.DB.prepare('INSERT INTO logs (bot_id, command_id, action, details, timestamp) VALUES (?, ?, ?, ?, ?)').bind(bot.bot_id, command.command_id, 'error_in_script', error.message, new Date().toISOString()).run();
+        // Use the safe script executor
+        const executor = new ScriptExecutor(token, message);
+        const result = await executor.executeScript(command.script);
+        
+        if (result.success) {
+          executed_successfully = true;
+          response = result.result || 'Command executed successfully';
+        } else {
+          response = 'Error in command script: ' + result.error;
+          
+          // Log the error
+          await env.DB.prepare(
+            'INSERT INTO logs (bot_id, command_id, action, details, timestamp) VALUES (?, ?, ?, ?, ?)'
+          ).bind(
+            bot_record.bot_id, command?.command_id ?? null, 'error_in_script', result.error, new Date().toISOString()
+          ).run();
+        }
+      } catch (err) {
+        response = 'Error in command script: ' + err.message;
+        
+        // Log the error
+        await env.DB.prepare(
+          'INSERT INTO logs (bot_id, command_id, action, details, timestamp) VALUES (?, ?, ?, ?, ?)'
+        ).bind(
+          bot_record.bot_id, command?.command_id ?? null, 'error_in_script', err.message, new Date().toISOString()
+        ).run();
+        
+        // Send error message to user
+        const bot = new TelegramBot(token);
+        await bot.sendMessage(message.chat.id, response);
       }
+    } else {
+      response = 'Unknown command. Type /help for available commands.';
+      const bot = new TelegramBot(token);
+      await bot.sendMessage(message.chat.id, response);
+    }
+
+    // Deduct points & log successful execution
+    if (executed_successfully || !command) {
+      await env.DB.prepare('UPDATE users SET points = points - 1 WHERE user_id = ?').bind(bot_record.user_id).run();
+      await env.DB.prepare(
+        'INSERT INTO logs (bot_id, command_id, action, details, points_deducted, timestamp) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind(
+        bot_record.bot_id, command?.command_id ?? null, 'script_executed', JSON.stringify({ output: response }), 1, new Date().toISOString()
+      ).run();
     }
   }
   return { success: true };

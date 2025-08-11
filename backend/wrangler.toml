@@ -1,0 +1,8 @@
+name = "bot-hosting-worker"
+main = "src/index.js"
+compatibility_date = "2025-08-10"  # Use current date format
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bot-platform-db"
+database_id = "ac19cd75-41e2-45b6-81a8-1bc2f3ac700f"  # Replace with actual ID

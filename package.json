@@ -1,0 +1,20 @@
+{
+  "name": "telegram-bot-hosting",
+  "version": "1.0.0",
+  "description": "botsgram hosting plateform",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/akshay-thummar/telegram-bot-hosting.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/akshay-thummar/telegram-bot-hosting/issues"
+  },
+  "homepage": "https://github.com/akshay-thummar/telegram-bot-hosting#readme"
+}
